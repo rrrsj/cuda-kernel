@@ -9,6 +9,5 @@ int main()
     printf("cpu: hello world.\n");
     hello_world<<<1, 10>>>();//<<>> thread map
     cudaDeviceReset();//device synchronize 
-    
     return 0;
 }
