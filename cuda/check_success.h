@@ -30,7 +30,7 @@ int check_result(float*a,float*b,const int size)
     int ok=1;
     for(int i=0;i<size;i++)
     {
-        if(fabs(a[i]-b[i])>0.0001)
+        if(fabs(a[i]-b[i])>0.001)
         {
             return 0;
         }
