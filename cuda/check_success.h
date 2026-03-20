@@ -21,7 +21,8 @@ do\
 
 void initialData(float *ip, int size) {
     for (int i = 0; i < size; i++) {
-        ip[i] = (float)rand() / 1; 
+        // RAND_MAX 是 rand() 能产生的最大整数
+        ip[i] = ((float)rand() / (float)RAND_MAX) * 10.0f;
     }
 }
 
