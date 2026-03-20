@@ -47,28 +47,63 @@ void gpu_matrix_multi_blas(float*matrix_one,float*matrix_two,float* matrix_ans,i
     return ;
 }
 
+__global__ void navie_gpu_kernel(float* matrix_one,float* matrix_two,float* matrix_ans,int n,int m,int k)
+{
+    int all_thread_x=blockDim.x;
+    int all_thread_y=blockDim.y;
+    int thread_x_id=threadIdx.x;
+    int thread_y_id=threadIdx.y;
+    int grid_x_id=blockIdx.x;
+    int grid_y_id=blockIdx.y;
+    float now_ans=0;
+    int one_position=grid_y_id*all_thread_y+thread_y_id;
+    int two_position=grid_x_id*all_thread_x+thread_x_id;
+    for(int i=0;i<m;i++)
+    {
+        now_ans+=matrix_one[one_position*m+i]*matrix_two[i*m+two_position];
+    }
+    matrix_ans[one_position*k+two_position]=now_ans;
+    return;
+}
+
 int main()
 {
-    const int n=10,m=10,k=10;
+    const int n=1024,m=1024,k=1024;
     float*matrix_one,*matrix_two,*matrix_ans;
     matrix_one=new float[n*m];
     matrix_two=new float[m*k];
     matrix_ans=new float[n*k];
+    cublasHandle_t now_handle;
+
+    float* matrix_one_gpu,*matrix_two_gpu,*matrix_ans_gpu,*matrix_ans_from_gpu;
+
     initialData(matrix_one,n*m);
     initialData(matrix_two,m*k);
-    float* matrix_one_gpu,*matrix_two_gpu,*matrix_ans_gpu,*matrix_ans_from_gpu;
     matrix_ans_from_gpu=new float[n*k];
     CHECK(cudaMalloc(&matrix_one_gpu,sizeof(float)*n*m));
     CHECK(cudaMalloc(&matrix_two_gpu,sizeof(float)*m*k));
     CHECK(cudaMalloc(&matrix_ans_gpu,sizeof(float)*n*k));
     CHECK(cudaMemcpy(matrix_one_gpu,matrix_one,sizeof(float)*n*m,cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(matrix_two_gpu,matrix_two,sizeof(float)*m*k,cudaMemcpyHostToDevice));
-    cublasHandle_t now_handle;
     cublasCreate(&now_handle);
+
+
     cpu_matrix_multi(matrix_one,matrix_two,matrix_ans,n,m,k);
-    gpu_matrix_multi_blas(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k,&now_handle);
+    
+    SPEED(gpu_matrix_multi_blas(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k,&now_handle));
     CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
-    cublasDestroy(now_handle);
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
+
+    dim3 block(32,32,1);
+    dim3 grid(n/block.x,k/block.y);
+    
+    SPEED((navie_gpu_kernel<<<grid,block>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
+    CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+    cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
+
+
+
+
+    cublasDestroy(now_handle);
     return 0;
 }

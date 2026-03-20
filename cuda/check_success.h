@@ -22,9 +22,25 @@ do\
 void initialData(float *ip, int size) {
     for (int i = 0; i < size; i++) {
         // RAND_MAX 是 rand() 能产生的最大整数
-        ip[i] = ((float)rand() / (float)RAND_MAX) * 10.0f;
+        ip[i] = ((float)rand() / (float)RAND_MAX) * 1.0f;
     }
 }
+
+#define SPEED(Function) \
+do { \
+    float _m = 0; \
+    cudaEvent_t _st, _sp; \
+    cudaEventCreate(&_st); \
+    cudaEventCreate(&_sp); \
+    cudaEventRecord(_st); \
+    Function; \
+    cudaEventRecord(_sp); \
+    cudaEventSynchronize(_sp); \
+    cudaEventElapsedTime(&_m, _st, _sp); \
+    printf("Execution Time: %f ms\n", _m); \
+    cudaEventDestroy(_st); \
+    cudaEventDestroy(_sp); \
+} while(0)
 
 int check_result(float*a,float*b,const int size)
 {
