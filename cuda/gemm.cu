@@ -6,6 +6,7 @@
 #define BN 32
 #define BK 32
 #define TN 4
+#define GET_POS_ONE(row, col) ((((col) >> 2) ^ ((row) % (BM/4))) << 2) | ((col) & 3)
 using namespace std;
 
 void cpu_matrix_multi(float*matrix_one,float*matrix_two,float*matrix_three,int n,int m,int k)
@@ -316,6 +317,183 @@ __global__ void double_load_kernel(float* matrix_one, float* matrix_two, float* 
     }
 }
 
+
+
+__global__ void block_kernel_swizzle_float4(float* matrix_one, float* matrix_two, float* matrix_ans, int n, int m, int k) {
+    __shared__ float share_one[BN][BK];
+    __shared__ float share_two[BK][BM];
+
+    float now_ans[TN][TN] = {0.0f};
+
+    int block_id_y = blockIdx.x; 
+    int block_id_x = blockIdx.y; 
+    int thread_id_y = threadIdx.x;
+    int thread_id_x = threadIdx.y;
+    int all_thread_y = blockDim.x;
+    int all_thread_x = blockDim.y;
+
+    int row_start = (block_id_x * all_thread_x + thread_id_x) * TN;
+    int col_start = (block_id_y * all_thread_y + thread_id_y) * TN;
+
+    #pragma unroll
+    for (int i = 0; i < m / BK; i++) {
+
+        #pragma unroll
+        for (int j = 0; j < TN; j++) {
+            #pragma unroll
+            for (int l = 0; l < BK; l += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_one[(row_start + j) * m + i * BK + l])[0];
+                int s_row = thread_id_x * TN + j;
+                share_one[s_row][GET_POS_ONE(s_row, l + 0)] = tmp.x;
+                share_one[s_row][GET_POS_ONE(s_row, l + 1)] = tmp.y;
+                share_one[s_row][GET_POS_ONE(s_row, l + 2)] = tmp.z;
+                share_one[s_row][GET_POS_ONE(s_row, l + 3)] = tmp.w;
+            }
+        }
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            #pragma unroll
+            for (int j = 0; j < TN; j += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_two[(i * BK + l) * k + col_start + j])[0];
+                share_two[l][thread_id_y * TN + j + 0] = tmp.x;
+                share_two[l][thread_id_y * TN + j + 1] = tmp.y;
+                share_two[l][thread_id_y * TN + j + 2] = tmp.z;
+                share_two[l][thread_id_y * TN + j + 3] = tmp.w;
+            }
+        }
+
+        __syncthreads();
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            float reg_one[TN];
+            float reg_two[TN];
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                int s_row=thread_id_x * TN + res_i;
+                reg_one[res_i] = share_one[s_row][GET_POS_ONE(s_row, l)];
+            }
+            #pragma unroll
+            for (int res_j = 0; res_j < TN; res_j++) {
+                reg_two[res_j] = share_two[l][thread_id_y * TN + res_j];
+            }
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                #pragma unroll
+                for (int res_j = 0; res_j < TN; res_j++) {
+                    now_ans[res_i][res_j] += reg_one[res_i] * reg_two[res_j];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+
+    #pragma unroll
+    for (int i = 0; i < TN; i++) {
+        #pragma unroll
+        for (int j = 0; j < TN; j += 4) {
+            float4 res;
+            res.x = now_ans[i][j + 0];
+            res.y = now_ans[i][j + 1];
+            res.z = now_ans[i][j + 2];
+            res.w = now_ans[i][j + 3];
+            reinterpret_cast<float4*>(&matrix_ans[(row_start + i) * k + col_start + j])[0] = res;
+        }
+    }
+}
+
+__global__ void block_kernel_float4_swizzle(float* matrix_one, float* matrix_two, float* matrix_ans, int n, int m, int k) {
+    __shared__ float share_one[BN][BK];
+    __shared__ float share_two[BK][BM];
+
+    float now_ans[TN][TN] = {0.0f};
+
+    int block_id_y = blockIdx.x; 
+    int block_id_x = blockIdx.y; 
+    int thread_id_y = threadIdx.x;
+    int thread_id_x = threadIdx.y;
+    int all_thread_y = blockDim.x;
+    int all_thread_x = blockDim.y;
+
+    int row_start = (block_id_x * all_thread_x + thread_id_x) * TN;
+    int col_start = (block_id_y * all_thread_y + thread_id_y) * TN;
+
+    #pragma unroll
+    for (int i = 0; i < m / BK; i++) {
+        #pragma unroll
+        for (int j = 0; j < TN; j++) {
+            #pragma unroll
+            for (int l = 0; l < BK; l += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_one[(row_start + j) * m + i * BK + l])[0];
+                share_one[thread_id_x * TN + j][l + 0] = tmp.x;
+                share_one[thread_id_x * TN + j][l + 1] = tmp.y;
+                share_one[thread_id_x * TN + j][l + 2] = tmp.z;
+                share_one[thread_id_x * TN + j][l + 3] = tmp.w;
+            }
+        }
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            #pragma unroll
+            for (int j = 0; j < TN; j += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_two[(i * BK + l) * k + col_start + j])[0];
+                share_two[l][thread_id_y * TN + j + 0] = tmp.x;
+                share_two[l][thread_id_y * TN + j + 1] = tmp.y;
+                share_two[l][thread_id_y * TN + j + 2] = tmp.z;
+                share_two[l][thread_id_y * TN + j + 3] = tmp.w;
+            }
+        }
+
+        __syncthreads();
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            float reg_one[TN];
+            float reg_two[TN];
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                reg_one[res_i] = share_one[thread_id_x * TN + res_i][l];
+            }
+            #pragma unroll
+            for (int res_j = 0; res_j < TN; res_j++) {
+                reg_two[res_j] = share_two[l][thread_id_y * TN + res_j];
+            }
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                #pragma unroll
+                for (int res_j = 0; res_j < TN; res_j++) {
+                    now_ans[res_i][res_j] += reg_one[res_i] * reg_two[res_j];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+
+    #pragma unroll
+    for (int i = 0; i < TN; i++) {
+        #pragma unroll
+        for (int j = 0; j < TN; j += 4) {
+            float4 res;
+            res.x = now_ans[i][j + 0];
+            res.y = now_ans[i][j + 1];
+            res.z = now_ans[i][j + 2];
+            res.w = now_ans[i][j + 3];
+            reinterpret_cast<float4*>(&matrix_ans[(row_start + i) * k + col_start + j])[0] = res;
+        }
+    }
+}
+
+
+
+
+
 int main()
 {
     const int n=1024,m=1024,k=1024;
@@ -369,6 +547,12 @@ int main()
     dim3 block_gpu2(BM/TN,BN/TN);
     dim3 gird_gpu2(k/BM,n/BN);
     SPEED((block_kernel_float4<<<gird_gpu2,block_gpu2>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
+    CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+    cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
+
+    dim3 block_gpu3(BM/TN,BN/TN);
+    dim3 gird_gpu3(k/BM,n/BN);
+    SPEED((block_kernel_float4_swizzle<<<gird_gpu3,block_gpu3>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
     CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
