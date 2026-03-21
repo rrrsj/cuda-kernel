@@ -34,6 +34,10 @@ do { \
     cudaEventCreate(&_sp); \
     cudaEventRecord(_st); \
     Function; \
+    cudaError_t err = cudaGetLastError();\
+    if (err != cudaSuccess) {\
+        printf("CUDA Error (Startup): %s\n", cudaGetErrorString(err));\
+    }\
     cudaEventRecord(_sp); \
     cudaEventSynchronize(_sp); \
     cudaEventElapsedTime(&_m, _st, _sp); \

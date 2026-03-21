@@ -2,10 +2,10 @@
 #include<cuda_runtime.h>
 #include"check_success.h"
 #include<cublas_v2.h>
-#define BM 4
-#define BN 4
-#define BK 4
-#define TN 8
+#define BM 32
+#define BN 32
+#define BK 32
+#define TN 4
 using namespace std;
 
 void cpu_matrix_multi(float*matrix_one,float*matrix_two,float*matrix_three,int n,int m,int k)
@@ -72,8 +72,8 @@ __global__ void navie_gpu_kernel(float* matrix_one,float* matrix_two,float* matr
 
 __global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_ans,int n,int m,int k)
 {
-    __shared__ float share_one[BN][BK+1];
-    __shared__ float share_two[BK][BM+1];
+    __shared__ float share_one[BN][BK];
+    __shared__ float share_two[BK][BM];
     float now_ans[TN][TN]={0.0f};
     int block_id_y=blockIdx.x;
     int block_id_x=blockIdx.y;
@@ -82,8 +82,8 @@ __global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_a
     int all_thread_y=blockDim.x;
     int all_thread_x=blockDim.y;
 
-    int one_position=(block_id_x*all_thread_x+thread_id_x)*TN;
-    int two_position=(block_id_y*all_thread_y+thread_id_y)*TN;
+    int row_start=(block_id_x*all_thread_x+thread_id_x)*TN;
+    int col_start=(block_id_y*all_thread_y+thread_id_y)*TN;
 
     //每个thread负责 one_position -- one position + TN   two_position --- two position + TN
     //每个thread往share里写的位置应该是 thread_id_x*TN因为all thread x*TN=BN
@@ -98,7 +98,7 @@ __global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_a
             for(int l=0;l<BK;l++)
             {
                 //one_position+j   l
-                share_one[thread_id_x*TN+j][l]=matrix_one[(one_position+j)*m+i*BK+l];
+                share_one[thread_id_x*TN+j][l]=matrix_one[(row_start+j)*m+i*BK+l];
             }
         }
 
@@ -108,10 +108,9 @@ __global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_a
             #pragma unroll
             for(int j=0;j<TN;j++)
             {
-                share_two[l][thread_id_y*TN+j]=matrix_two[(i*BK+l)*k+two_position+j];
+                share_two[l][thread_id_y*TN+j]=matrix_two[(i*BK+l)*k+col_start+j];
             }
         }
-
 
         __syncthreads();
         
@@ -147,11 +146,174 @@ __global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_a
         #pragma unroll
         for(int j=0;j<TN;j++)
         {
-            matrix_ans[(one_position+i)*n+two_position+j]=now_ans[i][j];
+            matrix_ans[(row_start+i)*k+col_start+j]=now_ans[i][j];
         }
     }
     return ;
     
+}
+
+__global__ void block_kernel_float4(float* matrix_one, float* matrix_two, float* matrix_ans, int n, int m, int k) {
+    __shared__ float share_one[BN][BK];
+    __shared__ float share_two[BK][BM];
+
+    float now_ans[TN][TN] = {0.0f};
+
+    int block_id_y = blockIdx.x; 
+    int block_id_x = blockIdx.y; 
+    int thread_id_y = threadIdx.x;
+    int thread_id_x = threadIdx.y;
+    int all_thread_y = blockDim.x;
+    int all_thread_x = blockDim.y;
+
+    int row_start = (block_id_x * all_thread_x + thread_id_x) * TN;
+    int col_start = (block_id_y * all_thread_y + thread_id_y) * TN;
+
+    #pragma unroll
+    for (int i = 0; i < m / BK; i++) {
+        #pragma unroll
+        for (int j = 0; j < TN; j++) {
+            #pragma unroll
+            for (int l = 0; l < BK; l += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_one[(row_start + j) * m + i * BK + l])[0];
+                share_one[thread_id_x * TN + j][l + 0] = tmp.x;
+                share_one[thread_id_x * TN + j][l + 1] = tmp.y;
+                share_one[thread_id_x * TN + j][l + 2] = tmp.z;
+                share_one[thread_id_x * TN + j][l + 3] = tmp.w;
+            }
+        }
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            #pragma unroll
+            for (int j = 0; j < TN; j += 4) {
+                float4 tmp = reinterpret_cast<float4*>(&matrix_two[(i * BK + l) * k + col_start + j])[0];
+                share_two[l][thread_id_y * TN + j + 0] = tmp.x;
+                share_two[l][thread_id_y * TN + j + 1] = tmp.y;
+                share_two[l][thread_id_y * TN + j + 2] = tmp.z;
+                share_two[l][thread_id_y * TN + j + 3] = tmp.w;
+            }
+        }
+
+        __syncthreads();
+
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            float reg_one[TN];
+            float reg_two[TN];
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                reg_one[res_i] = share_one[thread_id_x * TN + res_i][l];
+            }
+            #pragma unroll
+            for (int res_j = 0; res_j < TN; res_j++) {
+                reg_two[res_j] = share_two[l][thread_id_y * TN + res_j];
+            }
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                #pragma unroll
+                for (int res_j = 0; res_j < TN; res_j++) {
+                    now_ans[res_i][res_j] += reg_one[res_i] * reg_two[res_j];
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+
+    #pragma unroll
+    for (int i = 0; i < TN; i++) {
+        #pragma unroll
+        for (int j = 0; j < TN; j += 4) {
+            float4 res;
+            res.x = now_ans[i][j + 0];
+            res.y = now_ans[i][j + 1];
+            res.z = now_ans[i][j + 2];
+            res.w = now_ans[i][j + 3];
+            reinterpret_cast<float4*>(&matrix_ans[(row_start + i) * k + col_start + j])[0] = res;
+        }
+    }
+}
+
+__global__ void double_load_kernel(float* matrix_one, float* matrix_two, float* matrix_ans, int n, int m, int k)
+{
+    __shared__ float share_one[BN][BK];
+    __shared__ float share_two[BK][BM];
+
+    float now_ans[TN][TN] = {0.0f};
+
+    float prefetch_one[TN][BK];
+    float prefetch_two[BK][TN];
+
+    int block_id_y = blockIdx.x;
+    int block_id_x = blockIdx.y;
+    int thread_id_y = threadIdx.x;
+    int thread_id_x = threadIdx.y;
+    int all_thread_y = blockDim.x;
+    int all_thread_x = blockDim.y;
+
+    int row_start = (block_id_x * all_thread_x + thread_id_x) * TN;
+    int col_start = (block_id_y * all_thread_y + thread_id_y) * TN;
+
+    #pragma unroll
+    for(int j=0; j<TN; j++) {
+        for(int l=0; l<BK; l++) {
+            share_one[thread_id_x*TN+j][l] = matrix_one[(row_start+j)*m + 0*BK+l];
+            share_two[l][thread_id_y*TN+j] = matrix_two[(0*BK+l)*k + col_start+j];
+        }
+    }
+    __syncthreads();
+    for(int i=0; i < m/BK; i++) {
+        int next_i = i + 1;
+        if (next_i < m/BK) {
+            #pragma unroll
+            for(int j=0; j<TN; j++) {
+                for(int l=0; l<BK; l++) {
+                    prefetch_one[j][l] = matrix_one[(row_start+j)*m + next_i*BK+l];
+                    prefetch_two[l][j] = matrix_two[(next_i*BK+l)*k + col_start+j];
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            float reg_one[TN];
+            float reg_two[TN];
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) reg_one[res_i] = share_one[thread_id_x * TN + res_i][l];
+            #pragma unroll
+            for (int res_j = 0; res_j < TN; res_j++) reg_two[res_j] = share_two[l][thread_id_y * TN + res_j];
+
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                #pragma unroll
+                for (int res_j = 0; res_j < TN; res_j++) {
+                    now_ans[res_i][res_j] += reg_one[res_i] * reg_two[res_j];
+                }
+            }
+        }
+
+        __syncthreads();
+
+        if (next_i < m/BK) {
+            #pragma unroll
+            for(int j=0; j<TN; j++) {
+                for(int l=0; l<BK; l++) {
+                    share_one[thread_id_x*TN+j][l] = prefetch_one[j][l];
+                    share_two[l][thread_id_y*TN+j] = prefetch_two[l][j];
+                }
+            }
+        }
+        __syncthreads();
+    }
+    #pragma unroll
+    for(int i=0; i<TN; i++) {
+        for(int j=0; j<TN; j++) {
+            matrix_ans[(row_start+i)*k + col_start+j] = now_ans[i][j];
+        }
+    }
 }
 
 int main()
@@ -181,13 +343,13 @@ int main()
     SPEED(gpu_matrix_multi_blas(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k,&now_handle));
     CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
-
-    dim3 block(32,32,1);
-    dim3 grid(k/block.x,n/block.y,1);
+    cublasDestroy(now_handle);
     
+
+    dim3 block(16,16,1);
+    dim3 grid(k/block.x,n/block.y,1);
     SPEED((navie_gpu_kernel<<<grid,block>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
     CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
-
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
 
@@ -198,7 +360,17 @@ int main()
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
 
+    dim3 block_gpu1(BM/TN,BN/TN);
+    dim3 gird_gpu1(k/BM,n/BN);
+    SPEED((double_load_kernel<<<gird_gpu1,block_gpu1>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
+    CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+    cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
-    cublasDestroy(now_handle);
+    dim3 block_gpu2(BM/TN,BN/TN);
+    dim3 gird_gpu2(k/BM,n/BN);
+    SPEED((block_kernel_float4<<<gird_gpu2,block_gpu2>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
+    CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+    cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
+
     return 0;
 }
