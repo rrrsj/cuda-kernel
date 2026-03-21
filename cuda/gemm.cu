@@ -2,6 +2,10 @@
 #include<cuda_runtime.h>
 #include"check_success.h"
 #include<cublas_v2.h>
+#define BM 4
+#define BN 4
+#define BK 4
+#define TN 8
 using namespace std;
 
 void cpu_matrix_multi(float*matrix_one,float*matrix_two,float*matrix_three,int n,int m,int k)
@@ -56,14 +60,98 @@ __global__ void navie_gpu_kernel(float* matrix_one,float* matrix_two,float* matr
     int grid_x_id=blockIdx.x;
     int grid_y_id=blockIdx.y;
     float now_ans=0;
-    int one_position=grid_y_id*all_thread_y+thread_y_id;
-    int two_position=grid_x_id*all_thread_x+thread_x_id;
+    int row=grid_y_id*all_thread_y+thread_y_id;
+    int col=grid_x_id*all_thread_x+thread_x_id;
     for(int i=0;i<m;i++)
     {
-        now_ans+=matrix_one[one_position*m+i]*matrix_two[i*m+two_position];
+        now_ans+=matrix_one[row*m+i]*matrix_two[i*k+col];
     }
-    matrix_ans[one_position*k+two_position]=now_ans;
+    matrix_ans[row*k+col]=now_ans;
     return;
+}
+
+__global__ void block_kernel(float* matrix_one,float* matrix_two,float* matrix_ans,int n,int m,int k)
+{
+    __shared__ float share_one[BN][BK+1];
+    __shared__ float share_two[BK][BM+1];
+    float now_ans[TN][TN]={0.0f};
+    int block_id_y=blockIdx.x;
+    int block_id_x=blockIdx.y;
+    int thread_id_y=threadIdx.x;
+    int thread_id_x=threadIdx.y;
+    int all_thread_y=blockDim.x;
+    int all_thread_x=blockDim.y;
+
+    int one_position=(block_id_x*all_thread_x+thread_id_x)*TN;
+    int two_position=(block_id_y*all_thread_y+thread_id_y)*TN;
+
+    //每个thread负责 one_position -- one position + TN   two_position --- two position + TN
+    //每个thread往share里写的位置应该是 thread_id_x*TN因为all thread x*TN=BN
+    //每个thread读的位置应该是 one position+j i*BK+l
+    #pragma unroll
+    for(int i=0;i<m/BK;i++)
+    {
+        #pragma unroll
+        for(int j=0;j<TN;j++)
+        {
+            #pragma unroll
+            for(int l=0;l<BK;l++)
+            {
+                //one_position+j   l
+                share_one[thread_id_x*TN+j][l]=matrix_one[(one_position+j)*m+i*BK+l];
+            }
+        }
+
+        #pragma unroll
+        for(int l=0;l<BK;l++)
+        {
+            #pragma unroll
+            for(int j=0;j<TN;j++)
+            {
+                share_two[l][thread_id_y*TN+j]=matrix_two[(i*BK+l)*k+two_position+j];
+            }
+        }
+
+
+        __syncthreads();
+        
+        #pragma unroll
+        for (int l = 0; l < BK; l++) {
+            
+            float reg_one[TN];
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                reg_one[res_i] = share_one[thread_id_x * TN + res_i][l];
+            }
+            float reg_two[TN];
+            #pragma unroll
+            for (int res_j = 0; res_j < TN; res_j++) {
+                reg_two[res_j] = share_two[l][thread_id_y * TN + res_j];
+            }
+
+            #pragma unroll
+            for (int res_i = 0; res_i < TN; res_i++) {
+                #pragma unroll
+                for (int res_j = 0; res_j < TN; res_j++) {
+                    now_ans[res_i][res_j] += reg_one[res_i] * reg_two[res_j];
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for(int i=0;i<TN;i++)
+    {
+        #pragma unroll
+        for(int j=0;j<TN;j++)
+        {
+            matrix_ans[(one_position+i)*n+two_position+j]=now_ans[i][j];
+        }
+    }
+    return ;
+    
 }
 
 int main()
@@ -95,12 +183,19 @@ int main()
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
     dim3 block(32,32,1);
-    dim3 grid(n/block.x,k/block.y);
+    dim3 grid(k/block.x,n/block.y,1);
     
     SPEED((navie_gpu_kernel<<<grid,block>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
     CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+
     cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
+
+    dim3 block_gpu(BM/TN,BN/TN);
+    dim3 gird_gpu(k/BM,n/BN);
+    SPEED((block_kernel<<<gird_gpu,block_gpu>>>(matrix_one_gpu,matrix_two_gpu,matrix_ans_gpu,n,m,k)));
+    CHECK(cudaMemcpy(matrix_ans_from_gpu,matrix_ans_gpu,sizeof(float)*n*k,cudaMemcpyDeviceToHost));
+    cout<<check_result(matrix_ans_from_gpu,matrix_ans,n*k)<<'\n';
 
 
 
